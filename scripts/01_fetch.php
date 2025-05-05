@@ -8,6 +8,7 @@ use Symfony\Component\DomCrawler\Crawler;
 class MortuaryDataFetcher {
     private $client;
     private $baseUrl = 'https://mort.tainan.gov.tw/Inquire/I101.aspx?mid=1';
+    private $detailUrl = 'https://mort.tainan.gov.tw/Inquire/I161.aspx?mid=1&sid=';
     private $cookieJar;
 
     public function __construct() {
@@ -68,6 +69,83 @@ class MortuaryDataFetcher {
         return '';
     }
 
+    private function extractDateFromSid($sid) {
+        if (strlen($sid) >= 8) {
+            $datePart = substr($sid, 1, 7); // Get characters 2-8
+            $year = substr($datePart, 0, 3);
+            $month = substr($datePart, 3, 2);
+            return [
+                'year' => $year,
+                'month' => $month
+            ];
+        }
+        return null;
+    }
+
+    private function fetchDetailData($sid) {
+        try {
+            $response = $this->client->get($this->detailUrl . $sid);
+            $html = $response->getBody()->getContents();
+            
+            $crawler = new Crawler($html);
+            
+            // Look for the table within the printlist div
+            $table = $crawler->filter('#printlist table');
+            if ($table->count() === 0) {
+                echo "Warning: No table found in printlist div for SID {$sid}\n";
+                return null;
+            }
+
+            $data = [];
+            $headers = [];
+            
+            // Get headers from first row
+            $table->filter('tr:first-child th')->each(function (Crawler $node) use (&$headers) {
+                $headers[] = trim($node->text());
+            });
+
+            // Get data from subsequent rows
+            $table->filter('tr:not(:first-child)')->each(function (Crawler $row) use (&$data, $headers) {
+                $rowData = [];
+                $row->filter('td')->each(function (Crawler $cell, $index) use (&$rowData, $headers) {
+                    if (isset($headers[$index])) {
+                        $rowData[$headers[$index]] = trim($cell->text());
+                    }
+                });
+                if (!empty($rowData)) {
+                    $data[] = $rowData;
+                }
+            });
+
+            if (empty($data)) {
+                echo "Warning: No data extracted for SID {$sid}\n";
+                return null;
+            }
+
+            return $data;
+        } catch (Exception $e) {
+            echo "Error fetching detail data for SID {$sid}: " . $e->getMessage() . "\n";
+            return null;
+        }
+    }
+
+    private function saveDetailData($data, $sid) {
+        $dateInfo = $this->extractDateFromSid($sid);
+        if (!$dateInfo) {
+            echo "Invalid SID format: {$sid}\n";
+            return;
+        }
+
+        $dir = __DIR__ . "/../json/{$dateInfo['year']}/{$dateInfo['month']}";
+        if (!file_exists($dir)) {
+            mkdir($dir, 0777, true);
+        }
+
+        $filename = "{$dir}/{$sid}.json";
+        file_put_contents($filename, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        echo "Saved detail data for SID {$sid} to {$filename}\n";
+    }
+
     private function extractTableData($html) {
         $crawler = new Crawler($html);
         $table = $crawler->filter('#printlist');
@@ -97,6 +175,14 @@ class MortuaryDataFetcher {
                     if ($deceasedCell->filter('a')->count() > 0) {
                         $deceasedLink = $deceasedCell->filter('a')->attr('href');
                         $sid = $this->extractSidFromUrl($deceasedLink);
+                        
+                        // Fetch and save detail data
+                        if (!empty($sid)) {
+                            $detailData = $this->fetchDetailData($sid);
+                            if ($detailData) {
+                                $this->saveDetailData($detailData, $sid);
+                            }
+                        }
                     }
                     
                     // Add SID to the end of the row
